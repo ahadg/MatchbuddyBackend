@@ -3,6 +3,8 @@ import express from 'express';
 
 import { config } from './config.js';
 import { optionalAuth } from './middleware/auth.js';
+import authRouter from './routes/auth.js';
+import chatsRouter from './routes/chats.js';
 import fansRouter from './routes/fans.js';
 import fixturesRouter from './routes/fixtures.js';
 import listingsRouter from './routes/listings.js';
@@ -25,10 +27,12 @@ app.get('/health', (_req, res) => {
   });
 });
 
+app.use('/api/auth', authRouter);
 app.use(optionalAuth);
 
 app.use('/api/fixtures', fixturesRouter);
 app.use('/api/fans', fansRouter);
+app.use('/api/chats', chatsRouter);
 app.use('/api/listings', listingsRouter);
 app.use('/api/profile', profileRouter);
 

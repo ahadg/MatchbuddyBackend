@@ -2,7 +2,22 @@
 
 ## Authentication
 
-Send the Supabase access token as:
+Request a sign-in code:
+
+```http
+POST /api/auth/send-otp
+Content-Type: application/json
+```
+
+```json
+{
+  "email": "fan@example.com"
+}
+```
+
+This endpoint generates an email OTP with Supabase Auth Admin and sends that code through Resend.
+
+For authenticated requests after verification, send the Supabase access token as:
 
 ```http
 Authorization: Bearer <access-token>
@@ -23,6 +38,82 @@ Optional query parameters:
 - `limit`: default `20`, max `50`
 
 If `lat` and `lng` are omitted, the API falls back to the authenticated user’s saved profile location.
+
+Send a wave to a fan:
+
+```http
+POST /api/fans/:fanId/wave
+Authorization: Bearer <access-token>
+```
+
+This returns `pending` until the wave is mutual, then upgrades to `mutual` and includes a direct thread ID.
+
+## Listings
+
+Browse listings near an origin:
+
+```http
+GET /api/listings?radiusKm=50&lat=25.2854&lng=51.5310
+```
+
+Get a single listing by UUID or slug:
+
+```http
+GET /api/listings/azteca-loft?lat=25.2854&lng=51.5310
+```
+
+Request a spot:
+
+```http
+POST /api/listings/:listingId/join-requests
+Authorization: Bearer <access-token>
+Content-Type: application/json
+```
+
+```json
+{
+  "message": "Would love to join if there is room."
+}
+```
+
+Respond to a join request as the host:
+
+```http
+POST /api/listings/:listingId/join-requests/:requestId/respond
+Authorization: Bearer <access-token>
+Content-Type: application/json
+```
+
+```json
+{
+  "status": "approved"
+}
+```
+
+Group room messages after approval:
+
+```http
+GET /api/listings/:listingId/messages
+POST /api/listings/:listingId/messages
+Authorization: Bearer <access-token>
+```
+
+## Chats
+
+Unified inbox:
+
+```http
+GET /api/chats/inbox
+Authorization: Bearer <access-token>
+```
+
+Direct thread messages:
+
+```http
+GET /api/chats/direct/:threadId/messages
+POST /api/chats/direct/:threadId/messages
+Authorization: Bearer <access-token>
+```
 
 ## Profile upsert
 

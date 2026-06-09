@@ -21,6 +21,9 @@ export const config = {
   port: Number(process.env.PORT ?? 4000),
   clientOrigin: process.env.CLIENT_ORIGIN?.trim() || '*',
   databaseUrl: readRequired('DATABASE_URL'),
+  resendApiKey: readRequired('RESEND_API_KEY'),
+  resendFromEmail: readRequired('RESEND_FROM_EMAIL'),
+  resendFromName: process.env.RESEND_FROM_NAME?.trim() || 'MatchBuddy',
   supabaseUrl: readRequired('SUPABASE_URL'),
   supabaseSecretKey,
 };

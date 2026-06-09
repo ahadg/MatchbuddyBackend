@@ -12,6 +12,9 @@ export const db = {
   query(text, params) {
     return pool.query(text, params);
   },
+  connect() {
+    return pool.connect();
+  },
   end() {
     return pool.end();
   },

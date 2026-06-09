@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { db } from '../db.js';
+import { requireUser } from '../middleware/auth.js';
+import { ensureDirectThread, getCurrentProfileByAuthUserId, getProfileById } from '../lib/social.js';
 
 const router = Router();
 
@@ -41,7 +43,7 @@ const detailQuerySchema = z
     }
   });
 
-function mapFanRow(row) {
+function mapFanRow(row, socialState = null) {
   return {
     id: row.id,
     displayName: row.display_name,
@@ -60,16 +62,74 @@ function mapFanRow(row) {
     distanceKm: Number(row.distance_km ?? 0),
     initial: row.initial,
     setup: row.setup ?? null,
+    waveStatus: socialState?.waveStatus ?? 'none',
+    directThreadId: socialState?.directThreadId ?? null,
   };
 }
 
-function mapFanDetailRow(row) {
+function mapFanDetailRow(row, socialState = null) {
   return {
-    ...mapFanRow(row),
+    ...mapFanRow(row, socialState),
     age: Number(row.age ?? 0),
     bio: row.bio ?? '',
     favouriteTeams: row.favourite_teams ?? [],
   };
+}
+
+async function fetchSocialStateForFanIds(currentProfileId, fanIds, client = db) {
+  if (!currentProfileId || !fanIds.length) {
+    return new Map();
+  }
+
+  const { rows } = await client.query(
+    `
+      with fan_ids as (
+        select unnest($2::uuid[]) as fan_id
+      )
+      select
+        fan_ids.fan_id,
+        exists(
+          select 1
+          from waves outgoing
+          where outgoing.sender_profile_id = $1::uuid
+            and outgoing.receiver_profile_id = fan_ids.fan_id
+        ) as has_outgoing_wave,
+        exists(
+          select 1
+          from waves incoming
+          where incoming.sender_profile_id = fan_ids.fan_id
+            and incoming.receiver_profile_id = $1::uuid
+        ) as has_incoming_wave,
+        dt.id as direct_thread_id
+      from fan_ids
+      left join direct_threads dt
+        on dt.profile_low_id = least($1::uuid, fan_ids.fan_id)
+       and dt.profile_high_id = greatest($1::uuid, fan_ids.fan_id)
+    `,
+    [currentProfileId, fanIds],
+  );
+
+  return new Map(
+    rows.map((row) => {
+      let waveStatus = 'none';
+
+      if (row.has_outgoing_wave && row.has_incoming_wave) {
+        waveStatus = 'mutual';
+      } else if (row.has_outgoing_wave) {
+        waveStatus = 'pending';
+      } else if (row.has_incoming_wave) {
+        waveStatus = 'received';
+      }
+
+      return [
+        row.fan_id,
+        {
+          waveStatus,
+          directThreadId: row.direct_thread_id,
+        },
+      ];
+    }),
+  );
 }
 
 router.get('/nearby', async (req, res, next) => {
@@ -86,6 +146,8 @@ router.get('/nearby', async (req, res, next) => {
   }
 
   try {
+    const currentProfile = req.authUser?.id ? await getCurrentProfileByAuthUserId(req.authUser.id) : null;
+
     const { rows } = await db.query(
       `
         with origin as (
@@ -134,8 +196,13 @@ router.get('/nearby', async (req, res, next) => {
       [lat ?? null, lng ?? null, req.authUser?.id ?? null, radiusKm, fixtureId ?? null, vibe ?? null, limit],
     );
 
+    const socialState = await fetchSocialStateForFanIds(
+      currentProfile?.id ?? null,
+      rows.map((row) => row.id),
+    );
+
     return res.json({
-      data: rows.map(mapFanRow),
+      data: rows.map((row) => mapFanRow(row, socialState.get(row.id))),
     });
   } catch (error) {
     return next(error);
@@ -150,6 +217,8 @@ router.get('/:fanId', async (req, res, next) => {
   }
 
   try {
+    const currentProfile = req.authUser?.id ? await getCurrentProfileByAuthUserId(req.authUser.id) : null;
+
     const { rows } = await db.query(
       `
         with origin as (
@@ -203,9 +272,101 @@ router.get('/:fanId', async (req, res, next) => {
       return res.status(404).json({ error: 'Fan not found.' });
     }
 
-    return res.json({ data: mapFanDetailRow(rows[0]) });
+    const socialState = await fetchSocialStateForFanIds(currentProfile?.id ?? null, [rows[0].id]);
+
+    return res.json({ data: mapFanDetailRow(rows[0], socialState.get(rows[0].id)) });
   } catch (error) {
     return next(error);
+  }
+});
+
+router.post('/:fanId/wave', requireUser, async (req, res, next) => {
+  const client = await db.connect();
+
+  try {
+    const currentProfile = await getCurrentProfileByAuthUserId(req.authUser.id, client);
+
+    if (!currentProfile) {
+      return res.status(403).json({ error: 'Create your profile before sending waves.' });
+    }
+
+    const targetProfile = await getProfileById(req.params.fanId, client);
+
+    if (!targetProfile) {
+      return res.status(404).json({ error: 'Fan not found.' });
+    }
+
+    if (targetProfile.id === currentProfile.id) {
+      return res.status(400).json({ error: 'You cannot wave at your own profile.' });
+    }
+
+    const fixtureId = currentProfile.matchDayModeFixtureId ?? targetProfile.matchDayModeFixtureId ?? null;
+
+    await client.query('begin');
+
+    await client.query(
+      `
+        insert into waves (
+          sender_profile_id,
+          receiver_profile_id,
+          fixture_id
+        ) values (
+          $1::uuid,
+          $2::uuid,
+          $3::uuid
+        )
+        on conflict (sender_profile_id, receiver_profile_id) do update
+          set fixture_id = coalesce(waves.fixture_id, excluded.fixture_id)
+      `,
+      [currentProfile.id, targetProfile.id, fixtureId],
+    );
+
+    if (!targetProfile.authUserId) {
+      await client.query(
+        `
+          insert into waves (
+            sender_profile_id,
+            receiver_profile_id,
+            fixture_id
+          ) values (
+            $1::uuid,
+            $2::uuid,
+            $3::uuid
+          )
+          on conflict (sender_profile_id, receiver_profile_id) do update
+            set fixture_id = coalesce(waves.fixture_id, excluded.fixture_id)
+        `,
+        [targetProfile.id, currentProfile.id, fixtureId],
+      );
+    }
+
+    const socialState = await fetchSocialStateForFanIds(currentProfile.id, [targetProfile.id], client);
+    const state = socialState.get(targetProfile.id) ?? { waveStatus: 'pending', directThreadId: null };
+    let directThreadId = state.directThreadId;
+
+    if (state.waveStatus === 'mutual' && !directThreadId) {
+      const thread = await ensureDirectThread(client, {
+        profileAId: currentProfile.id,
+        profileBId: targetProfile.id,
+        fixtureId,
+      });
+      directThreadId = thread.id;
+    }
+
+    await client.query('commit');
+
+    return res.json({
+      data: {
+        status: directThreadId ? 'mutual' : state.waveStatus,
+        threadId: directThreadId,
+        fanId: targetProfile.id,
+      },
+    });
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    return next(error);
+  } finally {
+    client.release();
   }
 });
 

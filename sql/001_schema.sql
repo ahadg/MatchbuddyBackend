@@ -18,7 +18,7 @@ create table if not exists fixtures (
 
 create table if not exists profiles (
   id uuid primary key default gen_random_uuid(),
-  auth_user_id uuid unique references auth.users(id) on delete cascade,
+  auth_user_id uuid unique,
   email text,
   display_name text not null,
   age integer not null default 29,
