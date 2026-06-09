@@ -1,3 +1,4 @@
+import { config } from '../config.js';
 import { supabaseAdmin } from '../supabase.js';
 
 function readBearerToken(authorizationHeader) {
@@ -38,6 +39,20 @@ export async function optionalAuth(req, res, next) {
 export function requireUser(req, res, next) {
   if (!req.authUser) {
     return res.status(401).json({ error: 'Authentication required.' });
+  }
+
+  return next();
+}
+
+export function requireAdmin(req, res, next) {
+  if (!req.authUser) {
+    return res.status(401).json({ error: 'Authentication required.' });
+  }
+
+  const email = req.authUser.email?.trim().toLowerCase();
+
+  if (!email || !config.adminEmails.includes(email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
   }
 
   return next();
