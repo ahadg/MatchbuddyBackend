@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { db } from '../db.js';
 import {
   adjustListingApprovedGuests,
+  buildProfileAvatarUrl,
   buildProfileMetricsSql,
   createListingMessage,
   fixtureSummaryFromRow,
@@ -116,6 +117,7 @@ function mapRoomMessageRow(row) {
     id: row.id,
     listingId: row.listing_id,
     senderProfileId: row.sender_profile_id,
+    senderAvatarUrl: buildProfileAvatarUrl(row.sender_avatar_path),
     senderDisplayName: row.sender_display_name,
     senderInitial: row.sender_initial,
     body: row.body,
@@ -225,6 +227,7 @@ async function fetchRoomForProfile(listingIdentifier, currentProfileId, client =
         l.approved_guests,
         l.max_guests,
         l.join_message,
+        host.avatar_path as host_avatar_path,
         host.display_name as host_name,
         fx.stage as fixture_stage,
         fx.home_code,
@@ -254,6 +257,7 @@ async function fetchListingMessages(listingId, client = db) {
         lm.sender_profile_id,
         lm.body,
         lm.created_at,
+        sender.avatar_path as sender_avatar_path,
         sender.display_name as sender_display_name,
         coalesce(nullif(left(sender.display_name, 1), ''), '?') as sender_initial
       from listing_messages lm
@@ -387,6 +391,7 @@ router.get('/:listingId/messages', requireUser, async (req, res, next) => {
         room: {
           listingId: room.id,
           slug: room.slug,
+          hostAvatarUrl: buildProfileAvatarUrl(room.host_avatar_path),
           hostName: room.host_name,
           isHost,
           vibe: room.vibe,

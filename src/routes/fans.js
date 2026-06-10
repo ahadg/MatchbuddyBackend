@@ -2,8 +2,10 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { db } from '../db.js';
+import { sendWavePushNotification } from '../lib/onesignal.js';
 import { requireUser } from '../middleware/auth.js';
 import {
+  buildProfileAvatarUrl,
   buildProfileMetricsSql,
   ensureDirectThread,
   getCurrentProfileByAuthUserId,
@@ -55,6 +57,7 @@ const rateFanBodySchema = z.object({
 function mapFanRow(row, socialState = null) {
   return {
     id: row.id,
+    avatarUrl: buildProfileAvatarUrl(row.avatar_path),
     displayName: row.display_name,
     neighborhood: row.neighborhood,
     city: row.city,
@@ -123,7 +126,9 @@ async function fetchSocialStateForFanIds(currentProfileId, fanIds, client = db) 
     rows.map((row) => {
       let waveStatus = 'none';
 
-      if (row.has_outgoing_wave && row.has_incoming_wave) {
+      if (row.direct_thread_id) {
+        waveStatus = 'mutual';
+      } else if (row.has_outgoing_wave && row.has_incoming_wave) {
         waveStatus = 'mutual';
       } else if (row.has_outgoing_wave) {
         waveStatus = 'pending';
@@ -177,6 +182,7 @@ router.get('/nearby', async (req, res, next) => {
         )
         select
           p.id,
+          p.avatar_path,
           p.display_name,
           p.neighborhood,
           p.city,
@@ -248,6 +254,7 @@ router.get('/:fanId', async (req, res, next) => {
         )
         select
           p.id,
+          p.avatar_path,
           p.display_name,
           p.age,
           p.bio,
@@ -374,6 +381,17 @@ router.post('/:fanId/wave', requireUser, async (req, res, next) => {
     }
 
     await client.query('commit');
+
+    if (targetProfile.authUserId) {
+      sendWavePushNotification({
+        actorDisplayName: currentProfile.displayName,
+        fanId: currentProfile.id,
+        recipientExternalId: targetProfile.authUserId,
+        threadId: directThreadId,
+      }).catch((notificationError) => {
+        console.warn('Unable to send wave push notification.', notificationError);
+      });
+    }
 
     return res.json({
       data: {

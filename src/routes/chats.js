@@ -2,7 +2,12 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { db } from '../db.js';
-import { createDirectMessage, fixtureSummaryFromRow, getCurrentProfileByAuthUserId } from '../lib/social.js';
+import {
+  buildProfileAvatarUrl,
+  createDirectMessage,
+  fixtureSummaryFromRow,
+  getCurrentProfileByAuthUserId,
+} from '../lib/social.js';
 import { requireUser } from '../middleware/auth.js';
 
 const router = Router();
@@ -16,6 +21,7 @@ function mapDirectMessageRow(row) {
     id: row.id,
     threadId: row.thread_id,
     senderProfileId: row.sender_profile_id,
+    senderAvatarUrl: buildProfileAvatarUrl(row.sender_avatar_path),
     senderDisplayName: row.sender_display_name,
     senderInitial: row.sender_initial,
     body: row.body,
@@ -34,6 +40,7 @@ async function fetchDirectThreadForProfile(threadId, currentProfileId, client = 
         dt.unlocked_at,
         dt.updated_at,
         other.id as other_profile_id,
+        other.avatar_path as other_avatar_path,
         other.display_name as other_display_name,
         other.vibe as other_vibe,
         other.neighborhood as other_neighborhood,
@@ -67,6 +74,7 @@ async function fetchDirectMessages(threadId, client = db) {
         dm.sender_profile_id,
         dm.body,
         dm.created_at,
+        sender.avatar_path as sender_avatar_path,
         sender.display_name as sender_display_name,
         coalesce(nullif(left(sender.display_name, 1), ''), '?') as sender_initial
       from direct_messages dm
@@ -96,6 +104,7 @@ router.get('/inbox', async (req, res, next) => {
           select
             dt.id,
             other.id as other_profile_id,
+            other.avatar_path as other_avatar_path,
             other.display_name as other_display_name,
             other.vibe as other_vibe,
             other.neighborhood as other_neighborhood,
@@ -145,6 +154,12 @@ router.get('/inbox', async (req, res, next) => {
               where reciprocal.sender_profile_id = $1::uuid
                 and reciprocal.receiver_profile_id = w.sender_profile_id
             )
+            and not exists (
+              select 1
+              from direct_threads dt
+              where dt.profile_low_id = least($1::uuid, w.sender_profile_id)
+                and dt.profile_high_id = greatest($1::uuid, w.sender_profile_id)
+            )
           order by w.created_at desc
         `,
         [currentProfile.id],
@@ -158,6 +173,7 @@ router.get('/inbox', async (req, res, next) => {
             l.approved_guests,
             l.max_guests,
             host.id as host_id,
+            host.avatar_path as host_avatar_path,
             host.display_name as host_name,
             fx.stage,
             fx.home_code,
@@ -191,6 +207,7 @@ router.get('/inbox', async (req, res, next) => {
         directThreads: directThreadResult.rows.map((row) => ({
           id: row.id,
           otherProfileId: row.other_profile_id,
+          otherAvatarUrl: buildProfileAvatarUrl(row.other_avatar_path),
           otherDisplayName: row.other_display_name,
           otherInitial: row.other_initial,
           otherVibe: row.other_vibe,
@@ -213,6 +230,7 @@ router.get('/inbox', async (req, res, next) => {
           slug: row.slug,
           vibe: row.vibe,
           hostId: row.host_id,
+          hostAvatarUrl: buildProfileAvatarUrl(row.host_avatar_path),
           hostName: row.host_name,
           isHost: row.host_id === currentProfile.id,
           attendeeCount: Number(row.approved_guests ?? 0) + 1,
@@ -251,6 +269,7 @@ router.get('/direct/:threadId/messages', async (req, res, next) => {
         thread: {
           id: thread.id,
           otherProfileId: thread.other_profile_id,
+          otherAvatarUrl: buildProfileAvatarUrl(thread.other_avatar_path),
           otherDisplayName: thread.other_display_name,
           otherInitial: thread.other_initial,
           otherVibe: thread.other_vibe,

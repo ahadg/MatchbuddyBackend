@@ -21,6 +21,9 @@ export const config = {
   port: Number(process.env.PORT ?? 4000),
   clientOrigin: process.env.CLIENT_ORIGIN?.trim() || '*',
   databaseUrl: readRequired('DATABASE_URL'),
+  oneSignalAppId:
+    process.env.ONESIGNAL_APP_ID?.trim() || 'c6f336ef-6a24-41e0-a71c-99f439a0d440',
+  oneSignalRestApiKey: process.env.ONESIGNAL_REST_API_KEY?.trim() || '',
   resendApiKey: readRequired('RESEND_API_KEY'),
   resendFromEmail: readRequired('RESEND_FROM_EMAIL'),
   resendFromName: process.env.RESEND_FROM_NAME?.trim() || 'MatchBuddy',

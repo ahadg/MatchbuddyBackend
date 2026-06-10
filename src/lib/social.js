@@ -1,4 +1,6 @@
+import { config } from '../config.js';
 import { db } from '../db.js';
+import { supabaseAdmin } from '../supabase.js';
 
 function mapProfile(row) {
   if (!row) {
@@ -8,6 +10,7 @@ function mapProfile(row) {
   return {
     id: row.id,
     authUserId: row.auth_user_id,
+    avatarUrl: buildProfileAvatarUrl(row.avatar_path),
     displayName: row.display_name,
     neighborhood: row.neighborhood,
     city: row.city,
@@ -24,6 +27,18 @@ function mapProfile(row) {
     setup: row.setup ?? null,
     initial: row.initial ?? '?',
   };
+}
+
+export function buildProfileAvatarUrl(avatarPath) {
+  if (!avatarPath) {
+    return null;
+  }
+
+  const { data } = supabaseAdmin.storage
+    .from(config.supabaseProfilePhotoBucket)
+    .getPublicUrl(avatarPath);
+
+  return data.publicUrl ?? null;
 }
 
 function sanitizeSqlAlias(value) {
@@ -119,6 +134,7 @@ export async function getCurrentProfileByAuthUserId(authUserId, client = db) {
       select
         id,
         auth_user_id,
+        avatar_path,
         display_name,
         neighborhood,
         city,
@@ -150,6 +166,7 @@ export async function getProfileById(profileId, client = db) {
       select
         id,
         auth_user_id,
+        avatar_path,
         display_name,
         neighborhood,
         city,
