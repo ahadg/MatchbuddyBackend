@@ -26,4 +26,8 @@ export const config = {
   resendFromName: process.env.RESEND_FROM_NAME?.trim() || 'MatchBuddy',
   supabaseUrl: readRequired('SUPABASE_URL'),
   supabaseSecretKey,
+  adminEmails: (process.env.ADMIN_EMAILS?.trim() || 'muhmmadahad594@gmail.com')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean),
 };

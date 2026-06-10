@@ -62,7 +62,7 @@ async function sendResendEmail({ to, subject, text, html }) {
       'Idempotency-Key': randomUUID(),
     },
     body: JSON.stringify({
-      from: 'MatchBuddy <onboarding@resend.dev>',
+      from: getFromAddress(),
       to: [to],
       subject,
       text,

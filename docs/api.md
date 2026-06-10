@@ -48,6 +48,47 @@ Authorization: Bearer <access-token>
 
 This returns `pending` until the wave is mutual, then upgrades to `mutual` and includes a direct thread ID.
 
+## Fixtures
+
+Read the tournament fixture list:
+
+```http
+GET /api/fixtures
+```
+
+Create a new fixture as the admin account:
+
+```http
+POST /api/fixtures
+Authorization: Bearer <access-token>
+Content-Type: application/json
+```
+
+Update a fixture by UUID:
+
+```http
+PUT /api/fixtures/:fixtureId
+Authorization: Bearer <access-token>
+Content-Type: application/json
+```
+
+```json
+{
+  "slug": "world-cup-2026-match-104-final",
+  "stage": "Final",
+  "kickoffAt": "2026-07-19T19:00:00.000Z",
+  "homeCode": "W101",
+  "homeTeam": "Winner Match 101",
+  "awayCode": "W102",
+  "awayTeam": "Winner Match 102",
+  "venue": "MetLife Stadium",
+  "hostCity": "New York/New Jersey",
+  "highlight": "The FIFA World Cup 2026 final."
+}
+```
+
+Only emails listed in `ADMIN_EMAILS` can create or edit fixtures. The default admin email is `muhmmadahad594@gmail.com`.
+
 ## Listings
 
 Browse listings near an origin:
@@ -144,3 +185,13 @@ Content-Type: application/json
   }
 }
 ```
+
+## Importing the FIFA World Cup 2026 schedule
+
+Run the importer from the backend workspace:
+
+```bash
+npm run import:world-cup-2026
+```
+
+This loads all 104 fixtures into `fixtures`, preserves existing records by slug with upserts, and re-points the demo profiles and listings to real World Cup 2026 matches.
