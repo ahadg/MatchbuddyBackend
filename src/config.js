@@ -24,6 +24,8 @@ export const config = {
   resendApiKey: readRequired('RESEND_API_KEY'),
   resendFromEmail: readRequired('RESEND_FROM_EMAIL'),
   resendFromName: process.env.RESEND_FROM_NAME?.trim() || 'MatchBuddy',
+  supabaseProfilePhotoBucket:
+    process.env.SUPABASE_PROFILE_PHOTO_BUCKET?.trim() || 'profile-photos',
   supabaseUrl: readRequired('SUPABASE_URL'),
   supabaseSecretKey,
   adminEmails: (process.env.ADMIN_EMAILS?.trim() || 'muhmmadahad594@gmail.com')

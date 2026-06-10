@@ -1,13 +1,17 @@
 import { Router } from 'express';
 import { z } from 'zod';
 
+import { config } from '../config.js';
 import { db } from '../db.js';
 import { buildProfileMetricsSql } from '../lib/social.js';
 import { requireUser } from '../middleware/auth.js';
+import { supabaseAdmin } from '../supabase.js';
 
 const router = Router();
 
 const vibeSchema = z.enum(['Loud', 'Chill', 'Family', 'Women-only']);
+const avatarUploadLimitBytes = 5 * 1024 * 1024;
+const allowedAvatarMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
 
 const setupSchema = z
   .object({
@@ -43,6 +47,11 @@ const profileBodySchema = z.object({
   location: locationSchema,
 });
 
+const profileAvatarBodySchema = z.object({
+  base64: z.string().min(1),
+  contentType: z.enum(allowedAvatarMimeTypes).optional(),
+});
+
 function defaultDisplayName(email) {
   const localPart = email?.split('@')[0] ?? 'MatchBuddy fan';
   return localPart
@@ -52,11 +61,84 @@ function defaultDisplayName(email) {
     .join(' ');
 }
 
+function getAvatarExtension(contentType) {
+  switch (contentType) {
+    case 'image/png':
+      return 'png';
+    case 'image/webp':
+      return 'webp';
+    case 'image/jpeg':
+    default:
+      return 'jpg';
+  }
+}
+
+function buildAvatarUrl(avatarPath) {
+  if (!avatarPath) {
+    return null;
+  }
+
+  const { data } = supabaseAdmin.storage
+    .from(config.supabaseProfilePhotoBucket)
+    .getPublicUrl(avatarPath);
+
+  return data.publicUrl ?? null;
+}
+
+function normalizeBase64(base64) {
+  return base64.replace(/^data:[^;]+;base64,/, '').replace(/\s/g, '');
+}
+
+async function ensureProfilePhotoBucket() {
+  const { data: buckets, error } = await supabaseAdmin.storage.listBuckets();
+
+  if (error) {
+    throw error;
+  }
+
+  const existingBucket = buckets.find(
+    (bucket) =>
+      bucket.name === config.supabaseProfilePhotoBucket ||
+      bucket.id === config.supabaseProfilePhotoBucket,
+  );
+
+  if (!existingBucket) {
+    const { error: createError } = await supabaseAdmin.storage.createBucket(
+      config.supabaseProfilePhotoBucket,
+      {
+        public: true,
+        allowedMimeTypes: allowedAvatarMimeTypes,
+      },
+    );
+
+    if (createError && !/already exists/i.test(createError.message ?? '')) {
+      throw createError;
+    }
+
+    return;
+  }
+
+  if (!existingBucket.public) {
+    const { error: updateError } = await supabaseAdmin.storage.updateBucket(
+      config.supabaseProfilePhotoBucket,
+      {
+        public: true,
+        allowedMimeTypes: allowedAvatarMimeTypes,
+      },
+    );
+
+    if (updateError) {
+      throw updateError;
+    }
+  }
+}
+
 function mapProfileRow(row) {
   return {
     id: row.id,
     authUserId: row.auth_user_id,
     email: row.email,
+    avatarUrl: buildAvatarUrl(row.avatar_path),
     displayName: row.display_name,
     age: Number(row.age ?? 0),
     bio: row.bio ?? '',
@@ -92,6 +174,7 @@ async function fetchProfileByAuthUserId(authUserId) {
         id,
         auth_user_id,
         email,
+        avatar_path,
         display_name,
         age,
         bio,
@@ -120,6 +203,20 @@ async function fetchProfileByAuthUserId(authUserId) {
   return rows[0] ? mapProfileRow(rows[0]) : null;
 }
 
+async function fetchAvatarPathByAuthUserId(authUserId) {
+  const { rows } = await db.query(
+    `
+      select avatar_path
+      from profiles
+      where auth_user_id = $1::uuid
+      limit 1
+    `,
+    [authUserId],
+  );
+
+  return rows[0]?.avatar_path ?? null;
+}
+
 router.use(requireUser);
 
 router.get('/me', async (req, res, next) => {
@@ -131,6 +228,72 @@ router.get('/me', async (req, res, next) => {
     }
 
     return res.json({ data: profile });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.post('/me/avatar', async (req, res, next) => {
+  const parsed = profileAvatarBodySchema.safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Invalid avatar upload body.', details: parsed.error.flatten() });
+  }
+
+  try {
+    const existingProfile = await fetchProfileByAuthUserId(req.authUser.id);
+
+    if (!existingProfile) {
+      return res.status(404).json({ error: 'Profile not found. Create one first.' });
+    }
+
+    const contentType = parsed.data.contentType ?? 'image/jpeg';
+    const normalizedBase64 = normalizeBase64(parsed.data.base64);
+    const buffer = Buffer.from(normalizedBase64, 'base64');
+
+    if (!buffer.byteLength) {
+      return res.status(400).json({ error: 'Profile photo is empty.' });
+    }
+
+    if (buffer.byteLength > avatarUploadLimitBytes) {
+      return res.status(400).json({ error: 'Profile photo must be 5 MB or smaller.' });
+    }
+
+    await ensureProfilePhotoBucket();
+
+    const previousAvatarPath = await fetchAvatarPathByAuthUserId(req.authUser.id);
+    const avatarPath = `${req.authUser.id}/avatar-${Date.now()}.${getAvatarExtension(contentType)}`;
+    const bucket = supabaseAdmin.storage.from(config.supabaseProfilePhotoBucket);
+
+    const { error: uploadError } = await bucket.upload(avatarPath, buffer, {
+      contentType,
+      upsert: true,
+    });
+
+    if (uploadError) {
+      throw uploadError;
+    }
+
+    await db.query(
+      `
+        update profiles
+        set avatar_path = $2::text,
+            updated_at = now()
+        where auth_user_id = $1::uuid
+      `,
+      [req.authUser.id, avatarPath],
+    );
+
+    if (previousAvatarPath && previousAvatarPath !== avatarPath) {
+      const { error: removeError } = await bucket.remove([previousAvatarPath]);
+
+      if (removeError) {
+        console.warn('Unable to remove previous profile photo from storage.', removeError);
+      }
+    }
+
+    const refreshedProfile = await fetchProfileByAuthUserId(req.authUser.id);
+    return res.json({ data: refreshedProfile });
   } catch (error) {
     return next(error);
   }
