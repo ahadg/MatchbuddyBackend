@@ -3,7 +3,12 @@ import { z } from 'zod';
 
 import { db } from '../db.js';
 import { requireUser } from '../middleware/auth.js';
-import { ensureDirectThread, getCurrentProfileByAuthUserId, getProfileById } from '../lib/social.js';
+import {
+  buildProfileMetricsSql,
+  ensureDirectThread,
+  getCurrentProfileByAuthUserId,
+  getProfileById,
+} from '../lib/social.js';
 
 const router = Router();
 
@@ -43,6 +48,10 @@ const detailQuerySchema = z
     }
   });
 
+const rateFanBodySchema = z.object({
+  score: z.coerce.number().int().min(1).max(5),
+});
+
 function mapFanRow(row, socialState = null) {
   return {
     id: row.id,
@@ -73,6 +82,7 @@ function mapFanDetailRow(row, socialState = null) {
     age: Number(row.age ?? 0),
     bio: row.bio ?? '',
     favouriteTeams: row.favourite_teams ?? [],
+    myRating: row.my_rating === null || row.my_rating === undefined ? null : Number(row.my_rating),
   };
 }
 
@@ -147,6 +157,7 @@ router.get('/nearby', async (req, res, next) => {
 
   try {
     const currentProfile = req.authUser?.id ? await getCurrentProfileByAuthUserId(req.authUser.id) : null;
+    const metricsSql = buildProfileMetricsSql('p');
 
     const { rows } = await db.query(
       `
@@ -174,9 +185,7 @@ router.get('/nearby', async (req, res, next) => {
           p.is_host,
           p.women_only,
           p.family_friendly,
-          p.rating,
-          p.rating_count,
-          p.wave_back_rate,
+          ${metricsSql.selects},
           p.host_wins,
           p.match_day_mode_fixture_id,
           p.setup,
@@ -184,6 +193,7 @@ router.get('/nearby', async (req, res, next) => {
           round((ST_Distance(p.geog, origin.geog) / 1000.0)::numeric, 1) as distance_km
         from profiles p
         cross join origin
+        ${metricsSql.joins}
         where origin.geog is not null
           and p.geog is not null
           and ($3::uuid is null or p.auth_user_id is distinct from $3::uuid)
@@ -218,6 +228,7 @@ router.get('/:fanId', async (req, res, next) => {
 
   try {
     const currentProfile = req.authUser?.id ? await getCurrentProfileByAuthUserId(req.authUser.id) : null;
+    const metricsSql = buildProfileMetricsSql('p');
 
     const { rows } = await db.query(
       `
@@ -248,12 +259,11 @@ router.get('/:fanId', async (req, res, next) => {
           p.is_host,
           p.women_only,
           p.family_friendly,
-          p.rating,
-          p.rating_count,
-          p.wave_back_rate,
+          ${metricsSql.selects},
           p.host_wins,
           p.match_day_mode_fixture_id,
           p.setup,
+          my_rating.score as my_rating,
           coalesce(nullif(left(p.display_name, 1), ''), '?') as initial,
           case
             when origin.geog is not null and p.geog is not null
@@ -262,10 +272,20 @@ router.get('/:fanId', async (req, res, next) => {
           end as distance_km
         from profiles p
         cross join origin
+        ${metricsSql.joins}
+        left join fan_ratings my_rating
+          on my_rating.target_profile_id = p.id
+         and my_rating.rater_profile_id = $5::uuid
         where p.id = $1::uuid
         limit 1
       `,
-      [req.params.fanId, parsed.data.lat ?? null, parsed.data.lng ?? null, req.authUser?.id ?? null],
+      [
+        req.params.fanId,
+        parsed.data.lat ?? null,
+        parsed.data.lng ?? null,
+        req.authUser?.id ?? null,
+        currentProfile?.id ?? null,
+      ],
     );
 
     if (!rows[0]) {
@@ -360,6 +380,72 @@ router.post('/:fanId/wave', requireUser, async (req, res, next) => {
         status: directThreadId ? 'mutual' : state.waveStatus,
         threadId: directThreadId,
         fanId: targetProfile.id,
+      },
+    });
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    return next(error);
+  } finally {
+    client.release();
+  }
+});
+
+router.post('/:fanId/rate', requireUser, async (req, res, next) => {
+  const parsed = rateFanBodySchema.safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Invalid rating body.', details: parsed.error.flatten() });
+  }
+
+  const client = await db.connect();
+
+  try {
+    const currentProfile = await getCurrentProfileByAuthUserId(req.authUser.id, client);
+
+    if (!currentProfile) {
+      return res.status(403).json({ error: 'Create your profile before leaving a rating.' });
+    }
+
+    const targetProfile = await getProfileById(req.params.fanId, client);
+
+    if (!targetProfile) {
+      return res.status(404).json({ error: 'Fan not found.' });
+    }
+
+    if (targetProfile.id === currentProfile.id) {
+      return res.status(400).json({ error: 'You cannot rate your own profile.' });
+    }
+
+    await client.query('begin');
+
+    await client.query(
+      `
+        insert into fan_ratings (
+          rater_profile_id,
+          target_profile_id,
+          score
+        ) values (
+          $1::uuid,
+          $2::uuid,
+          $3::integer
+        )
+        on conflict (rater_profile_id, target_profile_id) do update
+          set score = excluded.score,
+              updated_at = now()
+      `,
+      [currentProfile.id, targetProfile.id, parsed.data.score],
+    );
+
+    const ratedProfile = await getProfileById(targetProfile.id, client);
+
+    await client.query('commit');
+
+    return res.json({
+      data: {
+        fanId: targetProfile.id,
+        rating: Number(ratedProfile?.rating ?? 0),
+        ratingCount: Number(ratedProfile?.ratingCount ?? 0),
+        myRating: parsed.data.score,
       },
     });
   } catch (error) {

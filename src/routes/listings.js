@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { db } from '../db.js';
 import {
   adjustListingApprovedGuests,
+  buildProfileMetricsSql,
   createListingMessage,
   fixtureSummaryFromRow,
   getCurrentProfileByAuthUserId,
@@ -144,6 +145,11 @@ async function fetchListingRequestStates(currentProfileId, listingIds, client = 
 
 async function fetchListingByIdentifier(listingIdentifier, options = {}, client = db) {
   const { lat = null, lng = null, authUserId = null } = options;
+  const hostMetricsSql = buildProfileMetricsSql('host', {
+    ratingAlias: 'host_rating',
+    ratingCountAlias: 'host_rating_count',
+    waveBackRateAlias: 'host_wave_back_rate',
+  });
 
   const { rows } = await client.query(
     `
@@ -171,7 +177,7 @@ async function fetchListingByIdentifier(listingIdentifier, options = {}, client 
         host.bio as host_bio,
         host.setup as host_setup,
         host.verified as host_verified,
-        host.rating as host_rating,
+        ${hostMetricsSql.selects},
         host.host_wins as host_host_wins,
         coalesce(nullif(left(host.display_name, 1), ''), '?') as host_initial,
         l.neighborhood,
@@ -198,6 +204,7 @@ async function fetchListingByIdentifier(listingIdentifier, options = {}, client 
       inner join profiles host on host.id = l.host_id
       inner join fixtures fx on fx.id = l.fixture_id
       cross join origin
+      ${hostMetricsSql.joins}
       where l.id::text = $1::text or l.slug = $1::text
       limit 1
     `,
@@ -275,6 +282,11 @@ router.get('/', async (req, res, next) => {
 
   try {
     const currentProfile = req.authUser?.id ? await getCurrentProfileByAuthUserId(req.authUser.id) : null;
+    const hostMetricsSql = buildProfileMetricsSql('host', {
+      ratingAlias: 'host_rating',
+      ratingCountAlias: 'host_rating_count',
+      waveBackRateAlias: 'host_wave_back_rate',
+    });
 
     const { rows } = await db.query(
       `
@@ -299,7 +311,7 @@ router.get('/', async (req, res, next) => {
           l.host_id,
           host.display_name as host_name,
           host.verified as host_verified,
-          host.rating as host_rating,
+          ${hostMetricsSql.selects},
           host.host_wins as host_host_wins,
           coalesce(nullif(left(host.display_name, 1), ''), '?') as host_initial,
           l.neighborhood,
@@ -319,6 +331,7 @@ router.get('/', async (req, res, next) => {
         inner join profiles host on host.id = l.host_id
         inner join fixtures fx on fx.id = l.fixture_id
         cross join origin
+        ${hostMetricsSql.joins}
         where origin.geog is not null
           and l.geog is not null
           and l.is_open = true

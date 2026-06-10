@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { db } from '../db.js';
+import { buildProfileMetricsSql } from '../lib/social.js';
 import { requireUser } from '../middleware/auth.js';
 
 const router = Router();
@@ -84,6 +85,7 @@ function mapProfileRow(row) {
 }
 
 async function fetchProfileByAuthUserId(authUserId) {
+  const metricsSql = buildProfileMetricsSql('p');
   const { rows } = await db.query(
     `
       select
@@ -98,9 +100,7 @@ async function fetchProfileByAuthUserId(authUserId) {
         vibe,
         favourite_teams,
         verified,
-        rating,
-        rating_count,
-        wave_back_rate,
+        ${metricsSql.selects},
         host_wins,
         is_host,
         women_only,
@@ -109,7 +109,8 @@ async function fetchProfileByAuthUserId(authUserId) {
         setup,
         ST_Y(geog::geometry) as latitude,
         ST_X(geog::geometry) as longitude
-      from profiles
+      from profiles p
+      ${metricsSql.joins}
       where auth_user_id = $1::uuid
       limit 1
     `,
@@ -167,7 +168,7 @@ router.put('/me', async (req, res, next) => {
       location: body.location ?? existingProfile?.location ?? null,
     };
 
-    const { rows } = await db.query(
+    await db.query(
       `
         insert into profiles (
           auth_user_id,
@@ -237,29 +238,6 @@ router.put('/me', async (req, res, next) => {
               setup = excluded.setup,
               geog = coalesce(excluded.geog, profiles.geog),
               updated_at = now()
-        returning
-          id,
-          auth_user_id,
-          email,
-          display_name,
-          age,
-          bio,
-          neighborhood,
-          city,
-          vibe,
-          favourite_teams,
-          verified,
-          rating,
-          rating_count,
-          wave_back_rate,
-          host_wins,
-          is_host,
-          women_only,
-          family_friendly,
-          match_day_mode_fixture_id,
-          setup,
-          ST_Y(geog::geometry) as latitude,
-          ST_X(geog::geometry) as longitude
       `,
       [
         req.authUser.id,
@@ -286,7 +264,8 @@ router.put('/me', async (req, res, next) => {
       ],
     );
 
-    return res.json({ data: mapProfileRow(rows[0]) });
+    const refreshedProfile = await fetchProfileByAuthUserId(req.authUser.id);
+    return res.json({ data: refreshedProfile });
   } catch (error) {
     return next(error);
   }

@@ -26,6 +26,76 @@ function mapProfile(row) {
   };
 }
 
+function sanitizeSqlAlias(value) {
+  return value.replace(/[^a-zA-Z0-9_]/g, '_');
+}
+
+export function buildProfileMetricsSql(
+  profileAlias,
+  {
+    ratingAlias = 'rating',
+    ratingCountAlias = 'rating_count',
+    waveBackRateAlias = 'wave_back_rate',
+  } = {},
+) {
+  const safeAlias = sanitizeSqlAlias(profileAlias);
+  const ratingStatsAlias = `${safeAlias}_rating_stats`;
+  const waveStatsAlias = `${safeAlias}_wave_stats`;
+
+  return {
+    joins: `
+      left join lateral (
+        select
+          coalesce(sum(score), 0)::numeric as live_rating_sum,
+          count(*)::int as live_rating_count
+        from fan_ratings
+        where target_profile_id = ${profileAlias}.id
+      ) ${ratingStatsAlias} on true
+      left join lateral (
+        select
+          case
+            when count(*) = 0 then null
+            else round(
+              (
+                count(*) filter (
+                  where exists (
+                    select 1
+                    from waves response
+                    where response.sender_profile_id = ${profileAlias}.id
+                      and response.receiver_profile_id = incoming.sender_profile_id
+                  )
+                ) * 100.0 / count(*)
+              )::numeric,
+              0
+            )::int
+          end as live_wave_back_rate
+        from waves incoming
+        where incoming.receiver_profile_id = ${profileAlias}.id
+      ) ${waveStatsAlias} on true
+    `,
+    selects: `
+      case
+        when coalesce(${profileAlias}.rating_count, 0) + coalesce(${ratingStatsAlias}.live_rating_count, 0) = 0 then 0::numeric
+        else round(
+          (
+            (coalesce(${profileAlias}.rating, 0)::numeric * coalesce(${profileAlias}.rating_count, 0)::numeric) +
+            coalesce(${ratingStatsAlias}.live_rating_sum, 0)::numeric
+          ) / (
+            coalesce(${profileAlias}.rating_count, 0)::numeric +
+            coalesce(${ratingStatsAlias}.live_rating_count, 0)::numeric
+          ),
+          1
+        )
+      end as ${ratingAlias},
+      coalesce(${profileAlias}.rating_count, 0) + coalesce(${ratingStatsAlias}.live_rating_count, 0) as ${ratingCountAlias},
+      case
+        when ${profileAlias}.auth_user_id is null then coalesce(${profileAlias}.wave_back_rate, 0)
+        else coalesce(${waveStatsAlias}.live_wave_back_rate, coalesce(${profileAlias}.wave_back_rate, 0))
+      end as ${waveBackRateAlias}
+    `,
+  };
+}
+
 export function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
@@ -43,6 +113,7 @@ export function fixtureSummaryFromRow(row) {
 }
 
 export async function getCurrentProfileByAuthUserId(authUserId, client = db) {
+  const metricsSql = buildProfileMetricsSql('p');
   const { rows } = await client.query(
     `
       select
@@ -53,9 +124,7 @@ export async function getCurrentProfileByAuthUserId(authUserId, client = db) {
         city,
         vibe,
         verified,
-        rating,
-        rating_count,
-        wave_back_rate,
+        ${metricsSql.selects},
         host_wins,
         is_host,
         women_only,
@@ -63,7 +132,8 @@ export async function getCurrentProfileByAuthUserId(authUserId, client = db) {
         match_day_mode_fixture_id,
         setup,
         coalesce(nullif(left(display_name, 1), ''), '?') as initial
-      from profiles
+      from profiles p
+      ${metricsSql.joins}
       where auth_user_id = $1::uuid
       limit 1
     `,
@@ -74,6 +144,7 @@ export async function getCurrentProfileByAuthUserId(authUserId, client = db) {
 }
 
 export async function getProfileById(profileId, client = db) {
+  const metricsSql = buildProfileMetricsSql('p');
   const { rows } = await client.query(
     `
       select
@@ -84,9 +155,7 @@ export async function getProfileById(profileId, client = db) {
         city,
         vibe,
         verified,
-        rating,
-        rating_count,
-        wave_back_rate,
+        ${metricsSql.selects},
         host_wins,
         is_host,
         women_only,
@@ -94,7 +163,8 @@ export async function getProfileById(profileId, client = db) {
         match_day_mode_fixture_id,
         setup,
         coalesce(nullif(left(display_name, 1), ''), '?') as initial
-      from profiles
+      from profiles p
+      ${metricsSql.joins}
       where id = $1::uuid
       limit 1
     `,
