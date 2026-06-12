@@ -12,7 +12,10 @@
     "db:down": "docker compose down",
     "db:logs": "docker compose logs -f postgres",
     "deploy": "node scripts/deploy.js",
-    "db:sync": "node scripts/db-sync.js"
+    "deploy:migrate": "node scripts/deploy.js --migrate",
+    "db:sync": "node scripts/db-sync.js",
+    "db:sync:catalog": "node scripts/db-sync.js --mode=catalog",
+    "db:sync:full": "node scripts/db-sync.js --mode=full"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",

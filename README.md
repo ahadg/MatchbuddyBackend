@@ -29,6 +29,14 @@ Node.js API for MatchBuddy, designed for PostgreSQL with PostGIS, Supabase Auth,
 7. Run `npm run migrate`.
 8. Run `npm run dev`.
 
+## Deployment notes
+
+- `npm run deploy` updates code, writes the remote `.env`, installs production dependencies, and reloads PM2.
+- `npm run deploy:migrate` does the same, but also runs `node src/scripts/migrate.js` on the VPS.
+- `npm run db:sync` safely upserts local fixtures into the live database.
+- `npm run db:sync:catalog` upserts fixtures, profiles, and listings.
+- `npm run db:sync:full` performs a full dump/restore from local to live and is destructive.
+
 ## Local database
 
 The backend includes [compose.yaml](./compose.yaml), which starts the official `postgis/postgis` image on host port `5433` by default so it does not collide with an existing local Postgres on `5432`.

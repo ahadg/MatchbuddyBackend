@@ -6,6 +6,9 @@ import dotenv from 'dotenv';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const envPath = path.resolve(__dirname, '../.env.deploy');
+const deployOptions = {
+  runMigrations: process.argv.slice(2).includes('--migrate'),
+};
 
 // Colors for console logging
 const colors = {
@@ -18,6 +21,13 @@ const colors = {
 
 function log(msg, color = colors.info) {
   console.log(`${color}${msg}${colors.reset}`);
+}
+
+function printDeployModeSummary() {
+  log(
+    `Deploy mode: code/env/pm2${deployOptions.runMigrations ? ' + migrations' : ' (migrations skipped)'}`,
+    colors.warn,
+  );
 }
 
 if (!fs.existsSync(envPath)) {
@@ -122,6 +132,7 @@ conn.on('keyboard-interactive', (name, instructions, instructionsLang, prompts, 
 
 conn.on('ready', async () => {
   log(`\nSuccessfully connected to VPS (${host}:${port}) as ${username}`, colors.success);
+  printDeployModeSummary();
 
   try {
     // 1. Ensure deploy directory exists
@@ -161,15 +172,19 @@ conn.on('ready', async () => {
 
     // 4. Install npm dependencies
     log('\n--- Installing dependencies ---');
-    await executeCommand(conn, `cd "${deployPath}" && npm install --omit=dev`);
+    await executeCommand(conn, `cd "${deployPath}" && npm ci --omit=dev`);
 
-    // 5. Run Database migrations
-    log('\n--- Running database migrations ---');
-    await executeCommand(conn, `cd "${deployPath}" && npm run migrate`);
+    // 5. Run Database migrations when explicitly requested
+    if (deployOptions.runMigrations) {
+      log('\n--- Running database migrations ---');
+      await executeCommand(conn, `cd "${deployPath}" && node src/scripts/migrate.js`);
+    } else {
+      log('\n--- Skipping database migrations (pass --migrate to run them) ---', colors.warn);
+    }
 
     // 6. Start / Reload with PM2
     log('\n--- Starting / Reloading application in PM2 ---');
-    await executeCommand(conn, `cd "${deployPath}" && pm2 startOrReload ecosystem.config.cjs`);
+    await executeCommand(conn, `cd "${deployPath}" && pm2 startOrReload ecosystem.config.cjs --update-env`);
 
     // Save PM2 process list to persist across server reboots
     await executeCommand(conn, 'pm2 save');

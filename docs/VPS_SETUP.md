@@ -198,7 +198,19 @@ Once the VPS server is prepared and `.env.deploy` is configured in your project 
    ```bash
    npm run deploy
    ```
-2. **Transfer local database data to remote**:
+2. **Deploy and run migrations explicitly**:
+   ```bash
+   npm run deploy:migrate
+   ```
+3. **Sync only fixtures from your local DB into the live DB**:
    ```bash
    npm run db:sync
+   ```
+4. **Sync fixtures, profiles, and listings from your local DB into the live DB**:
+   ```bash
+   npm run db:sync:catalog
+   ```
+5. **Full destructive database restore from local to live**:
+   ```bash
+   npm run db:sync:full
    ```
