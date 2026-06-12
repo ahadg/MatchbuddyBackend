@@ -128,15 +128,19 @@ async function handleSocketMessage(socket, rawMessage) {
   }
 
   if (message.type === 'authenticate') {
-    const auth = await authenticateSocket(message.token);
+    const authPromise = authenticateSocket(message.token);
+    state.authPromise = authPromise;
+    const auth = await authPromise;
 
     if (!auth) {
+      state.authPromise = null;
       sendJson(socket, { type: 'error', error: 'Realtime authentication failed.' });
       return;
     }
 
     state.profileId = auth.profile.id;
     state.authUserId = auth.user.id;
+    state.authPromise = null;
 
     sendJson(socket, {
       type: 'auth_ack',
@@ -144,6 +148,10 @@ async function handleSocketMessage(socket, rawMessage) {
       authUserId: auth.user.id,
     });
     return;
+  }
+
+  if (!state.profileId && state.authPromise) {
+    await state.authPromise.catch(() => null);
   }
 
   if (!state.profileId) {
@@ -197,6 +205,7 @@ export function attachRealtimeServer(server) {
   wss.on('connection', (socket) => {
     socketState.set(socket, {
       authUserId: null,
+      authPromise: null,
       profileId: null,
       directThreadIds: new Set(),
       listingIds: new Set(),

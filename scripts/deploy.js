@@ -122,16 +122,16 @@ conn.on('keyboard-interactive', (name, instructions, instructionsLang, prompts, 
 
 conn.on('ready', async () => {
   log(`\nSuccessfully connected to VPS (${host}:${port}) as ${username}`, colors.success);
-  
+
   try {
     // 1. Ensure deploy directory exists
     log('\n--- Checking deployment directory ---');
     await executeCommand(conn, `mkdir -p $(dirname "${deployPath}")`);
-    
+
     // 2. Clone repository if it does not exist, otherwise checkout & pull
     log('\n--- Updating code repository ---');
     const { stdout: dirCheck } = await executeCommand(conn, `if [ -d "${deployPath}/.git" ]; then echo "exists"; else echo "empty"; fi`);
-    
+
     if (dirCheck.includes('empty')) {
       log(`Cloning repository into ${deployPath}...`, colors.warn);
       await executeCommand(conn, `git clone -b "${branch}" "${repoUrl}" "${deployPath}"`);
@@ -152,10 +152,10 @@ conn.on('ready', async () => {
       }
     }
     const remoteEnvContent = prodEnvLines.join('\n');
-    
+
     // Escape single quotes in env content safely
     const escapedEnvContent = remoteEnvContent.replace(/'/g, "'\\''");
-    
+
     await executeCommand(conn, `cat << 'EOF' > "${deployPath}/.env"\n${escapedEnvContent}\nEOF`);
     log('Successfully wrote remote .env file', colors.success);
 
