@@ -10,7 +10,9 @@
     "import:world-cup-2026": "node src/scripts/import-world-cup-2026.js",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
-    "db:logs": "docker compose logs -f postgres"
+    "db:logs": "docker compose logs -f postgres",
+    "deploy": "node scripts/deploy.js",
+    "db:sync": "node scripts/db-sync.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",
@@ -20,5 +22,8 @@
     "pg": "^8.16.3",
     "ws": "^8.21.0",
     "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "ssh2": "^1.17.0"
   }
 }

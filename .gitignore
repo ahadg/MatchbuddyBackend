@@ -34,6 +34,11 @@ yarn-error.*
 # local env files
 .env*.local
 
+# deployment configuration & backups
+.env.deploy
+*.dump
+*.sql
+
 # typescript
 *.tsbuildinfo
 
