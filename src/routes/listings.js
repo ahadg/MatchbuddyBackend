@@ -2,6 +2,9 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { db } from '../db.js';
+import { createNotifications } from '../lib/notifications.js';
+import { sendListingRoomPushNotification } from '../lib/onesignal.js';
+import { broadcastListingMessageCreated } from '../lib/realtime.js';
 import {
   adjustListingApprovedGuests,
   buildProfileAvatarUrl,
@@ -248,6 +251,34 @@ async function fetchRoomForProfile(listingIdentifier, currentProfileId, client =
   return rows[0] ?? null;
 }
 
+async function fetchRoomNotificationRecipients(listingId, senderProfileId, client = db) {
+  const { rows } = await client.query(
+    `
+      select distinct
+        p.id,
+        p.auth_user_id,
+        p.display_name
+      from profiles p
+      where p.id in (
+        select l.host_id
+        from listings l
+        where l.id = $1::uuid
+
+        union
+
+        select req.guest_profile_id
+        from listing_join_requests req
+        where req.listing_id = $1::uuid
+          and req.status = 'approved'
+      )
+        and p.id <> $2::uuid
+    `,
+    [listingId, senderProfileId],
+  );
+
+  return rows;
+}
+
 async function fetchListingMessages(listingId, client = db) {
   const { rows } = await client.query(
     `
@@ -443,14 +474,56 @@ router.post('/:listingId/messages', requireUser, async (req, res, next) => {
       senderProfileId: currentProfile.id,
       body: parsed.data.body,
     });
+    const recipients = await fetchRoomNotificationRecipients(room.id, currentProfile.id, client);
+    const responseMessage = {
+      id: message.id,
+      listingId: message.listing_id,
+      senderProfileId: message.sender_profile_id,
+      senderAvatarUrl: currentProfile.avatarUrl,
+      senderDisplayName: currentProfile.displayName,
+      senderInitial: currentProfile.initial,
+      body: message.body,
+      createdAt: message.created_at,
+    };
+
+    await createNotifications(
+      client,
+      recipients.map((recipient) => ({
+        recipientProfileId: recipient.id,
+        actorProfileId: currentProfile.id,
+        type: 'listing_message',
+        title: `${currentProfile.displayName} sent a room update`,
+        body: message.body,
+        listingId: room.id,
+        fanId: currentProfile.id,
+        metadata: {
+          listingId: room.id,
+        },
+      })),
+    );
     await client.query('commit');
 
+    const recipientExternalIds = recipients
+      .map((recipient) => recipient.auth_user_id)
+      .filter(Boolean);
+
+    if (recipientExternalIds.length) {
+      sendListingRoomPushNotification({
+        actorDisplayName: currentProfile.displayName,
+        body: message.body,
+        listingId: room.id,
+        recipientExternalIds,
+      }).catch((notificationError) => {
+        console.warn('Unable to send listing room push notification.', notificationError);
+      });
+    }
+
+    broadcastListingMessageCreated(room.id, responseMessage, {
+      excludeProfileId: currentProfile.id,
+    });
+
     return res.status(201).json({
-      data: mapRoomMessageRow({
-        ...message,
-        sender_display_name: currentProfile.displayName,
-        sender_initial: currentProfile.initial,
-      }),
+      data: responseMessage,
     });
   } catch (error) {
     await client.query('rollback').catch(() => undefined);

@@ -2,6 +2,9 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { db } from '../db.js';
+import { createNotification } from '../lib/notifications.js';
+import { sendDirectMessagePushNotification } from '../lib/onesignal.js';
+import { broadcastDirectMessageCreated } from '../lib/realtime.js';
 import {
   buildProfileAvatarUrl,
   createDirectMessage,
@@ -40,6 +43,7 @@ async function fetchDirectThreadForProfile(threadId, currentProfileId, client = 
         dt.unlocked_at,
         dt.updated_at,
         other.id as other_profile_id,
+        other.auth_user_id as other_auth_user_id,
         other.avatar_path as other_avatar_path,
         other.display_name as other_display_name,
         other.vibe as other_vibe,
@@ -313,14 +317,48 @@ router.post('/direct/:threadId/messages', async (req, res, next) => {
       senderProfileId: currentProfile.id,
       body: parsed.data.body,
     });
+    const responseMessage = {
+      id: message.id,
+      threadId: message.thread_id,
+      senderProfileId: message.sender_profile_id,
+      senderAvatarUrl: currentProfile.avatarUrl,
+      senderDisplayName: currentProfile.displayName,
+      senderInitial: currentProfile.initial,
+      body: message.body,
+      createdAt: message.created_at,
+    };
+
+    await createNotification(client, {
+      recipientProfileId: thread.other_profile_id,
+      actorProfileId: currentProfile.id,
+      type: 'direct_message',
+      title: currentProfile.displayName,
+      body: message.body,
+      threadId: thread.id,
+      fanId: currentProfile.id,
+      metadata: {
+        threadId: thread.id,
+      },
+    });
     await client.query('commit');
 
+    if (thread.other_auth_user_id) {
+      sendDirectMessagePushNotification({
+        actorDisplayName: currentProfile.displayName,
+        body: message.body,
+        recipientExternalId: thread.other_auth_user_id,
+        threadId: thread.id,
+      }).catch((notificationError) => {
+        console.warn('Unable to send direct message push notification.', notificationError);
+      });
+    }
+
+    broadcastDirectMessageCreated(thread.id, responseMessage, {
+      excludeProfileId: currentProfile.id,
+    });
+
     return res.status(201).json({
-      data: mapDirectMessageRow({
-        ...message,
-        sender_display_name: currentProfile.displayName,
-        sender_initial: currentProfile.initial,
-      }),
+      data: responseMessage,
     });
   } catch (error) {
     await client.query('rollback').catch(() => undefined);

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { db } from '../db.js';
+import { createNotification } from '../lib/notifications.js';
 import { sendWavePushNotification } from '../lib/onesignal.js';
 import { requireUser } from '../middleware/auth.js';
 import {
@@ -379,6 +380,22 @@ router.post('/:fanId/wave', requireUser, async (req, res, next) => {
       });
       directThreadId = thread.id;
     }
+
+    await createNotification(client, {
+      recipientProfileId: targetProfile.id,
+      actorProfileId: currentProfile.id,
+      type: directThreadId ? 'mutual_wave' : 'wave',
+      title: directThreadId ? 'Mutual wave unlocked' : 'New wave on MatchBuddy',
+      body: directThreadId
+        ? `${currentProfile.displayName} waved back. Your chat is now open.`
+        : `${currentProfile.displayName} waved at you.`,
+      threadId: directThreadId,
+      fanId: currentProfile.id,
+      metadata: {
+        fanId: currentProfile.id,
+        threadId: directThreadId,
+      },
+    });
 
     await client.query('commit');
 
