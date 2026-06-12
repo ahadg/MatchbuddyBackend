@@ -9,7 +9,7 @@ This guide outlines how to prepare a clean Ubuntu VPS (e.g., 20.04 or 22.04 LTS)
 Log in to your VPS via SSH and update the system:
 ```bash
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y git curl build-essentialufw
+sudo apt install -y git curl build-essential ufw
 ```
 
 Configure the firewall:
@@ -132,6 +132,13 @@ Paste the configuration below, replacing `api.matchbuddy.shop` with your domain 
 server {
     listen 80;
     server_name api.matchbuddy.shop;
+    server_tokens off;
+    client_max_body_size 10m;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy no-referrer always;
+    add_header Permissions-Policy "camera=(), geolocation=(), microphone=()" always;
 
     location / {
         proxy_pass http://127.0.0.1:4000;
@@ -178,6 +185,8 @@ sudo apt install -y certbot python3-certbot-nginx
 sudo certbot --nginx -d api.matchbuddy.shop
 ```
 Certbot will verify your domain, issue the certificate, and automatically modify your Nginx file to enforce SSL/HTTPS redirect.
+
+When you want to test the deployed API from Expo web on your local machine, make sure the backend `CLIENT_ORIGIN` value includes `http://localhost:8081` in addition to your production site origins.
 
 ---
 

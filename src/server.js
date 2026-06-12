@@ -15,11 +15,52 @@ import profileRouter from './routes/profile.js';
 
 const app = express();
 
-app.use(
-  cors({
-    origin: config.clientOrigin === '*' ? true : config.clientOrigin.split(',').map((item) => item.trim()),
-  }),
-);
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+
+function normalizeOrigin(value) {
+  return value.trim().replace(/\/+$/, '');
+}
+
+function isAllowedOrigin(origin) {
+  if (!origin || config.allowAnyClientOrigin) {
+    return true;
+  }
+
+  return config.clientOrigins.includes(normalizeOrigin(origin));
+}
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (isAllowedOrigin(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`Origin ${origin} is not allowed by CORS.`));
+  },
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Accept', 'Authorization', 'Content-Type'],
+  optionsSuccessStatus: 204,
+  maxAge: 86400,
+};
+
+app.use((req, res, next) => {
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+  res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), microphone=()');
+
+  if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+
+  next();
+});
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '8mb' }));
 
 app.get('/health', (_req, res) => {
