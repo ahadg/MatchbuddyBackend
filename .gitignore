@@ -38,6 +38,7 @@ yarn-error.*
 .env.deploy
 *.dump
 *.sql
+!sql/*.sql
 
 # typescript
 *.tsbuildinfo
