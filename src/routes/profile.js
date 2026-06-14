@@ -52,6 +52,10 @@ const profileAvatarBodySchema = z.object({
   contentType: z.enum(allowedAvatarMimeTypes).optional(),
 });
 
+const deleteAccountBodySchema = z.object({
+  confirm: z.literal(true),
+});
+
 function defaultDisplayName(email) {
   const localPart = email?.split('@')[0] ?? 'MatchBuddy fan';
   return localPart
@@ -215,6 +219,19 @@ async function fetchAvatarPathByAuthUserId(authUserId) {
   );
 
   return rows[0]?.avatar_path ?? null;
+}
+
+async function deleteProfileByAuthUserId(authUserId, client = db) {
+  const { rows } = await client.query(
+    `
+      delete from profiles
+      where auth_user_id = $1::uuid
+      returning id, avatar_path
+    `,
+    [authUserId],
+  );
+
+  return rows[0] ?? null;
 }
 
 router.use(requireUser);
@@ -431,6 +448,51 @@ router.put('/me', async (req, res, next) => {
     return res.json({ data: refreshedProfile });
   } catch (error) {
     return next(error);
+  }
+});
+
+router.delete('/me', async (req, res, next) => {
+  const parsed = deleteAccountBodySchema.safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Confirm account deletion before continuing.' });
+  }
+
+  const client = await db.connect();
+  let avatarPath = null;
+
+  try {
+    await client.query('begin');
+    const deletedProfile = await deleteProfileByAuthUserId(req.authUser.id, client);
+    avatarPath = deletedProfile?.avatar_path ?? null;
+    await client.query('commit');
+
+    if (avatarPath) {
+      const { error: removeError } = await supabaseAdmin.storage
+        .from(config.supabaseProfilePhotoBucket)
+        .remove([avatarPath]);
+
+      if (removeError) {
+        console.warn('Unable to remove deleted profile photo from storage.', removeError);
+      }
+    }
+
+    const { error: deleteAuthError } = await supabaseAdmin.auth.admin.deleteUser(req.authUser.id);
+
+    if (deleteAuthError) {
+      console.warn('Unable to fully delete Supabase auth user after account deletion.', deleteAuthError);
+    }
+
+    return res.json({
+      data: {
+        success: true,
+      },
+    });
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    return next(error);
+  } finally {
+    client.release();
   }
 });
 
