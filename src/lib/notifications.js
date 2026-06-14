@@ -1,4 +1,5 @@
 import { db } from '../db.js';
+import { buildBlockedRelationSql } from './safety.js';
 import { buildProfileAvatarUrl } from './social.js';
 
 function mapNotificationRow(row) {
@@ -124,6 +125,7 @@ export async function fetchNotificationsForProfile(profileId, { limit = 30 } = {
         from app_notifications n
         left join profiles actor on actor.id = n.actor_profile_id
         where n.recipient_profile_id = $1::uuid
+          and not ${buildBlockedRelationSql('n.actor_profile_id', '$1::uuid')}
         order by n.created_at desc
         limit $2::integer
       `,
@@ -135,6 +137,7 @@ export async function fetchNotificationsForProfile(profileId, { limit = 30 } = {
         from app_notifications
         where recipient_profile_id = $1::uuid
           and read_at is null
+          and not ${buildBlockedRelationSql('actor_profile_id', '$1::uuid')}
       `,
       [profileId],
     ),

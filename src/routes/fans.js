@@ -4,6 +4,12 @@ import { z } from 'zod';
 import { db } from '../db.js';
 import { createNotification } from '../lib/notifications.js';
 import { sendWavePushNotification } from '../lib/onesignal.js';
+import {
+  areProfilesBlocked,
+  buildBlockedRelationSql,
+  createProfileBlock,
+  createSafetyReport,
+} from '../lib/safety.js';
 import { requireUser } from '../middleware/auth.js';
 import {
   buildProfileAvatarUrl,
@@ -53,6 +59,15 @@ const detailQuerySchema = z
 
 const rateFanBodySchema = z.object({
   score: z.coerce.number().int().min(1).max(5),
+});
+
+const blockFanBodySchema = z.object({
+  reason: z.string().trim().max(200).optional(),
+});
+
+const reportFanBodySchema = z.object({
+  category: z.enum(['harassment', 'spam', 'hate', 'sexual', 'violence', 'scam', 'unsafe', 'other']),
+  details: z.string().trim().max(500).optional(),
 });
 
 function mapFanRow(row, socialState = null) {
@@ -155,14 +170,14 @@ router.get('/nearby', async (req, res, next) => {
     return res.status(400).json({ error: 'Invalid nearby search query.', details: parsed.error.flatten() });
   }
 
-  const { lat, lng, radiusKm, fixtureId, vibe, limit } = parsed.data;
-
-  if (lat === undefined && lng === undefined && !req.authUser?.id) {
-    return res.status(400).json({ error: 'Provide lat/lng or authenticate with a saved profile location.' });
-  }
-
   try {
     const currentProfile = req.authUser?.id ? await getCurrentProfileByAuthUserId(req.authUser.id) : null;
+    const { lat, lng, radiusKm, fixtureId, vibe, limit } = parsed.data;
+
+    if (lat === undefined && lng === undefined && !currentProfile) {
+      return res.status(400).json({ error: 'Provide lat/lng or authenticate with a saved profile location.' });
+    }
+
     const metricsSql = buildProfileMetricsSql('p');
 
     const { rows } = await db.query(
@@ -176,7 +191,7 @@ router.get('/nearby', async (req, res, next) => {
                 then (
                   select geog
                   from profiles
-                  where auth_user_id = $3::uuid
+                  where id = $3::uuid
                 )
               else null::geography
             end as geog
@@ -203,14 +218,24 @@ router.get('/nearby', async (req, res, next) => {
         ${metricsSql.joins}
         where origin.geog is not null
           and p.geog is not null
-          and ($3::uuid is null or p.auth_user_id is distinct from $3::uuid)
-          and ST_DWithin(p.geog, origin.geog, $4::double precision * 1000)
-          and ($5::uuid is null or p.match_day_mode_fixture_id = $5::uuid)
-          and ($6::text is null or p.vibe = $6::text)
+          and ($4::uuid is null or p.id is distinct from $4::uuid)
+          and ($4::uuid is null or not ${buildBlockedRelationSql('p.id', '$4::uuid')})
+          and ST_DWithin(p.geog, origin.geog, $5::double precision * 1000)
+          and ($6::uuid is null or p.match_day_mode_fixture_id = $6::uuid)
+          and ($7::text is null or p.vibe = $7::text)
         order by ST_Distance(p.geog, origin.geog) asc
-        limit $7
+        limit $8
       `,
-      [lat ?? null, lng ?? null, req.authUser?.id ?? null, radiusKm, fixtureId ?? null, vibe ?? null, limit],
+      [
+        lat ?? null,
+        lng ?? null,
+        currentProfile?.id ?? null,
+        currentProfile?.id ?? null,
+        radiusKm,
+        fixtureId ?? null,
+        vibe ?? null,
+        limit,
+      ],
     );
 
     const socialState = await fetchSocialStateForFanIds(
@@ -248,7 +273,7 @@ router.get('/:fanId', async (req, res, next) => {
                 then (
                   select geog
                   from profiles
-                  where auth_user_id = $4::uuid
+                  where id = $4::uuid
                 )
               else null::geography
             end as geog
@@ -285,13 +310,14 @@ router.get('/:fanId', async (req, res, next) => {
           on my_rating.target_profile_id = p.id
          and my_rating.rater_profile_id = $5::uuid
         where p.id = $1::uuid
+          and ($5::uuid is null or not ${buildBlockedRelationSql('p.id', '$5::uuid')})
         limit 1
       `,
       [
         req.params.fanId,
         parsed.data.lat ?? null,
         parsed.data.lng ?? null,
-        req.authUser?.id ?? null,
+        currentProfile?.id ?? null,
         currentProfile?.id ?? null,
       ],
     );
@@ -326,6 +352,10 @@ router.post('/:fanId/wave', requireUser, async (req, res, next) => {
 
     if (targetProfile.id === currentProfile.id) {
       return res.status(400).json({ error: 'You cannot wave at your own profile.' });
+    }
+
+    if (await areProfilesBlocked(currentProfile.id, targetProfile.id, client)) {
+      return res.status(403).json({ error: 'This fan is unavailable for direct contact.' });
     }
 
     const fixtureId = currentProfile.matchDayModeFixtureId ?? targetProfile.matchDayModeFixtureId ?? null;
@@ -451,6 +481,10 @@ router.post('/:fanId/rate', requireUser, async (req, res, next) => {
       return res.status(400).json({ error: 'You cannot rate your own profile.' });
     }
 
+    if (await areProfilesBlocked(currentProfile.id, targetProfile.id, client)) {
+      return res.status(403).json({ error: 'This fan is unavailable.' });
+    }
+
     await client.query('begin');
 
     await client.query(
@@ -485,6 +519,98 @@ router.post('/:fanId/rate', requireUser, async (req, res, next) => {
     });
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
+    return next(error);
+  } finally {
+    client.release();
+  }
+});
+
+router.post('/:fanId/block', requireUser, async (req, res, next) => {
+  const parsed = blockFanBodySchema.safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Invalid block request body.', details: parsed.error.flatten() });
+  }
+
+  const client = await db.connect();
+
+  try {
+    const currentProfile = await getCurrentProfileByAuthUserId(req.authUser.id, client);
+
+    if (!currentProfile) {
+      return res.status(403).json({ error: 'Create your profile before blocking users.' });
+    }
+
+    const targetProfile = await getProfileById(req.params.fanId, client);
+
+    if (!targetProfile) {
+      return res.status(404).json({ error: 'Fan not found.' });
+    }
+
+    if (targetProfile.id === currentProfile.id) {
+      return res.status(400).json({ error: 'You cannot block your own profile.' });
+    }
+
+    await client.query('begin');
+    await createProfileBlock(client, {
+      blockerProfileId: currentProfile.id,
+      blockedProfileId: targetProfile.id,
+      reason: parsed.data.reason ?? '',
+    });
+    await client.query('commit');
+
+    return res.json({
+      data: {
+        success: true,
+      },
+    });
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    return next(error);
+  } finally {
+    client.release();
+  }
+});
+
+router.post('/:fanId/report', requireUser, async (req, res, next) => {
+  const parsed = reportFanBodySchema.safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Invalid report body.', details: parsed.error.flatten() });
+  }
+
+  const client = await db.connect();
+
+  try {
+    const currentProfile = await getCurrentProfileByAuthUserId(req.authUser.id, client);
+
+    if (!currentProfile) {
+      return res.status(403).json({ error: 'Create your profile before reporting users.' });
+    }
+
+    const targetProfile = await getProfileById(req.params.fanId, client);
+
+    if (!targetProfile) {
+      return res.status(404).json({ error: 'Fan not found.' });
+    }
+
+    if (targetProfile.id === currentProfile.id) {
+      return res.status(400).json({ error: 'You cannot report your own profile.' });
+    }
+
+    await createSafetyReport(client, {
+      reporterProfileId: currentProfile.id,
+      targetProfileId: targetProfile.id,
+      category: parsed.data.category,
+      details: parsed.data.details ?? '',
+    });
+
+    return res.status(201).json({
+      data: {
+        success: true,
+      },
+    });
+  } catch (error) {
     return next(error);
   } finally {
     client.release();

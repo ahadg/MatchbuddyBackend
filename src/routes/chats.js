@@ -5,6 +5,7 @@ import { db } from '../db.js';
 import { createNotification } from '../lib/notifications.js';
 import { sendDirectMessagePushNotification } from '../lib/onesignal.js';
 import { broadcastDirectMessageCreated } from '../lib/realtime.js';
+import { areProfilesBlocked, buildBlockedRelationSql, moderateChatBody } from '../lib/safety.js';
 import {
   buildProfileAvatarUrl,
   createDirectMessage,
@@ -61,6 +62,13 @@ async function fetchDirectThreadForProfile(threadId, currentProfileId, client = 
       left join fixtures fx on fx.id = dt.fixture_id
       where dt.id = $1::uuid
         and (dt.profile_low_id = $2::uuid or dt.profile_high_id = $2::uuid)
+        and not ${buildBlockedRelationSql(
+          `case
+            when dt.profile_low_id = $2::uuid then dt.profile_high_id
+            else dt.profile_low_id
+          end`,
+          '$2::uuid',
+        )}
       limit 1
     `,
     [threadId, currentProfileId],
@@ -133,7 +141,14 @@ router.get('/inbox', async (req, res, next) => {
             order by created_at desc
             limit 1
           ) last_message on true
-          where dt.profile_low_id = $1::uuid or dt.profile_high_id = $1::uuid
+          where (dt.profile_low_id = $1::uuid or dt.profile_high_id = $1::uuid)
+            and not ${buildBlockedRelationSql(
+              `case
+                when dt.profile_low_id = $1::uuid then dt.profile_high_id
+                else dt.profile_low_id
+              end`,
+              '$1::uuid',
+            )}
           order by coalesce(last_message.created_at, dt.updated_at, dt.unlocked_at) desc
         `,
         [currentProfile.id],
@@ -152,6 +167,7 @@ router.get('/inbox', async (req, res, next) => {
           inner join profiles sender on sender.id = w.sender_profile_id
           left join fixtures fx on fx.id = w.fixture_id
           where w.receiver_profile_id = $1::uuid
+            and not ${buildBlockedRelationSql('w.sender_profile_id', '$1::uuid')}
             and not exists (
               select 1
               from waves reciprocal
@@ -198,8 +214,9 @@ router.get('/inbox', async (req, res, next) => {
             order by created_at desc
             limit 1
           ) last_message on true
-          where l.host_id = $1::uuid
-             or req.status = 'approved'
+          where (l.host_id = $1::uuid
+             or req.status = 'approved')
+            and not ${buildBlockedRelationSql('host.id', '$1::uuid')}
           order by coalesce(last_message.created_at, l.updated_at, l.created_at) desc
         `,
         [currentProfile.id],
@@ -309,6 +326,15 @@ router.post('/direct/:threadId/messages', async (req, res, next) => {
 
     if (!thread) {
       return res.status(404).json({ error: 'Direct thread not found.' });
+    }
+
+    const moderationError = moderateChatBody(parsed.data.body);
+    if (moderationError) {
+      return res.status(400).json({ error: moderationError });
+    }
+
+    if (await areProfilesBlocked(currentProfile.id, thread.other_profile_id, client)) {
+      return res.status(403).json({ error: 'This chat is no longer available.' });
     }
 
     await client.query('begin');

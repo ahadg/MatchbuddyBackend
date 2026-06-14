@@ -6,6 +6,12 @@ import { createNotifications } from '../lib/notifications.js';
 import { sendListingRoomPushNotification } from '../lib/onesignal.js';
 import { broadcastListingMessageCreated } from '../lib/realtime.js';
 import {
+  areProfilesBlocked,
+  buildBlockedRelationSql,
+  createSafetyReport,
+  moderateChatBody,
+} from '../lib/safety.js';
+import {
   adjustListingApprovedGuests,
   buildProfileAvatarUrl,
   buildProfileMetricsSql,
@@ -59,6 +65,11 @@ const joinRequestResponseSchema = z.object({
 
 const roomMessageBodySchema = z.object({
   body: z.string().trim().min(1).max(1000),
+});
+
+const reportListingBodySchema = z.object({
+  category: z.enum(['harassment', 'spam', 'hate', 'sexual', 'violence', 'scam', 'unsafe', 'other']),
+  details: z.string().trim().max(500).optional(),
 });
 
 function approvedGuestDelta(previousStatus, nextStatus) {
@@ -149,7 +160,7 @@ async function fetchListingRequestStates(currentProfileId, listingIds, client = 
 }
 
 async function fetchListingByIdentifier(listingIdentifier, options = {}, client = db) {
-  const { lat = null, lng = null, authUserId = null } = options;
+  const { lat = null, lng = null, currentProfileId = null } = options;
   const hostMetricsSql = buildProfileMetricsSql('host', {
     ratingAlias: 'host_rating',
     ratingCountAlias: 'host_rating_count',
@@ -160,16 +171,16 @@ async function fetchListingByIdentifier(listingIdentifier, options = {}, client 
     `
       with origin as (
         select
-          case
-            when $2::double precision is not null and $3::double precision is not null
-              then ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography
-            when $4::uuid is not null
-              then (
-                select geog
-                from profiles
-                where auth_user_id = $4::uuid
-              )
-            else null::geography
+            case
+              when $2::double precision is not null and $3::double precision is not null
+                then ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography
+              when $4::uuid is not null
+                then (
+                  select geog
+                  from profiles
+                  where id = $4::uuid
+                )
+              else null::geography
           end as geog
       )
       select
@@ -210,10 +221,11 @@ async function fetchListingByIdentifier(listingIdentifier, options = {}, client 
       inner join fixtures fx on fx.id = l.fixture_id
       cross join origin
       ${hostMetricsSql.joins}
-      where l.id::text = $1::text or l.slug = $1::text
+      where (l.id::text = $1::text or l.slug = $1::text)
+        and ($5::uuid is null or not ${buildBlockedRelationSql('host.id', '$5::uuid')})
       limit 1
     `,
-    [listingIdentifier, lat, lng, authUserId],
+    [listingIdentifier, lat, lng, currentProfileId, currentProfileId],
   );
 
   return rows[0] ?? null;
@@ -242,7 +254,8 @@ async function fetchRoomForProfile(listingIdentifier, currentProfileId, client =
       left join listing_join_requests req
         on req.listing_id = l.id
        and req.guest_profile_id = $2::uuid
-      where l.id::text = $1::text or l.slug = $1::text
+      where (l.id::text = $1::text or l.slug = $1::text)
+        and not ${buildBlockedRelationSql('host.id', '$2::uuid')}
       limit 1
     `,
     [listingIdentifier, currentProfileId],
@@ -272,6 +285,7 @@ async function fetchRoomNotificationRecipients(listingId, senderProfileId, clien
           and req.status = 'approved'
       )
         and p.id <> $2::uuid
+        and not ${buildBlockedRelationSql('p.id', '$2::uuid')}
     `,
     [listingId, senderProfileId],
   );
@@ -309,14 +323,14 @@ router.get('/', async (req, res, next) => {
     return res.status(400).json({ error: 'Invalid listing query.', details: parsed.error.flatten() });
   }
 
-  const { lat, lng, radiusKm, fixtureId } = parsed.data;
-
-  if (lat === undefined && lng === undefined && !req.authUser?.id) {
-    return res.status(400).json({ error: 'Provide lat/lng or authenticate with a saved profile location.' });
-  }
-
   try {
     const currentProfile = req.authUser?.id ? await getCurrentProfileByAuthUserId(req.authUser.id) : null;
+    const { lat, lng, radiusKm, fixtureId } = parsed.data;
+
+    if (lat === undefined && lng === undefined && !currentProfile) {
+      return res.status(400).json({ error: 'Provide lat/lng or authenticate with a saved profile location.' });
+    }
+
     const hostMetricsSql = buildProfileMetricsSql('host', {
       ratingAlias: 'host_rating',
       ratingCountAlias: 'host_rating_count',
@@ -334,7 +348,7 @@ router.get('/', async (req, res, next) => {
                 then (
                   select geog
                   from profiles
-                  where auth_user_id = $3::uuid
+                  where id = $3::uuid
                 )
               else null::geography
             end as geog
@@ -370,11 +384,19 @@ router.get('/', async (req, res, next) => {
         where origin.geog is not null
           and l.geog is not null
           and l.is_open = true
-          and ST_DWithin(l.geog, origin.geog, $4::double precision * 1000)
-          and ($5::uuid is null or l.fixture_id = $5::uuid)
+          and ($4::uuid is null or not ${buildBlockedRelationSql('host.id', '$4::uuid')})
+          and ST_DWithin(l.geog, origin.geog, $5::double precision * 1000)
+          and ($6::uuid is null or l.fixture_id = $6::uuid)
         order by ST_Distance(l.geog, origin.geog) asc
       `,
-      [lat ?? null, lng ?? null, req.authUser?.id ?? null, radiusKm, fixtureId ?? null],
+      [
+        lat ?? null,
+        lng ?? null,
+        currentProfile?.id ?? null,
+        currentProfile?.id ?? null,
+        radiusKm,
+        fixtureId ?? null,
+      ],
     );
 
     const requestStates = await fetchListingRequestStates(
@@ -445,6 +467,11 @@ router.post('/:listingId/messages', requireUser, async (req, res, next) => {
 
   if (!parsed.success) {
     return res.status(400).json({ error: 'Invalid room message body.', details: parsed.error.flatten() });
+  }
+
+  const moderationError = moderateChatBody(parsed.data.body);
+  if (moderationError) {
+    return res.status(400).json({ error: moderationError });
   }
 
   const client = await db.connect();
@@ -557,6 +584,10 @@ router.post('/:listingId/join-requests', requireUser, async (req, res, next) => 
 
     if (listing.host_id === currentProfile.id) {
       return res.status(400).json({ error: 'Hosts cannot request their own listing.' });
+    }
+
+    if (await areProfilesBlocked(currentProfile.id, listing.host_id, client)) {
+      return res.status(403).json({ error: 'This host is unavailable.' });
     }
 
     if (!listing.is_open) {
@@ -746,6 +777,51 @@ router.post('/:listingId/join-requests/:requestId/respond', requireUser, async (
   }
 });
 
+router.post('/:listingId/report', requireUser, async (req, res, next) => {
+  const parsed = reportListingBodySchema.safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Invalid listing report body.', details: parsed.error.flatten() });
+  }
+
+  const client = await db.connect();
+
+  try {
+    const currentProfile = await getCurrentProfileByAuthUserId(req.authUser.id, client);
+
+    if (!currentProfile) {
+      return res.status(403).json({ error: 'Create your profile before reporting listings.' });
+    }
+
+    const listing = await fetchListingByIdentifier(
+      req.params.listingId,
+      { currentProfileId: currentProfile.id },
+      client,
+    );
+
+    if (!listing) {
+      return res.status(404).json({ error: 'Listing not found.' });
+    }
+
+    await createSafetyReport(client, {
+      reporterProfileId: currentProfile.id,
+      targetListingId: listing.id,
+      category: parsed.data.category,
+      details: parsed.data.details ?? '',
+    });
+
+    return res.status(201).json({
+      data: {
+        success: true,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  } finally {
+    client.release();
+  }
+});
+
 router.get('/:listingId', async (req, res, next) => {
   const parsed = detailQuerySchema.safeParse(req.query);
 
@@ -760,7 +836,7 @@ router.get('/:listingId', async (req, res, next) => {
       {
         lat: parsed.data.lat ?? null,
         lng: parsed.data.lng ?? null,
-        authUserId: req.authUser?.id ?? null,
+        currentProfileId: currentProfile?.id ?? null,
       },
       db,
     );

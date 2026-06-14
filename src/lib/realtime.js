@@ -2,6 +2,7 @@ import { WebSocketServer } from 'ws';
 
 import { db } from '../db.js';
 import { supabaseAdmin } from '../supabase.js';
+import { buildBlockedRelationSql } from './safety.js';
 import { getCurrentProfileByAuthUserId } from './social.js';
 
 const directThreadSubscribers = new Map();
@@ -78,9 +79,16 @@ async function canAccessDirectThread(threadId, profileId) {
   const { rows } = await db.query(
     `
       select 1
-      from direct_threads
-      where id = $1::uuid
-        and (profile_low_id = $2::uuid or profile_high_id = $2::uuid)
+      from direct_threads dt
+      where dt.id = $1::uuid
+        and (dt.profile_low_id = $2::uuid or dt.profile_high_id = $2::uuid)
+        and not ${buildBlockedRelationSql(
+          `case
+            when dt.profile_low_id = $2::uuid then dt.profile_high_id
+            else dt.profile_low_id
+          end`,
+          '$2::uuid',
+        )}
       limit 1
     `,
     [threadId, profileId],
@@ -94,6 +102,7 @@ async function canAccessListingRoom(listingId, profileId) {
     `
       select 1
       from listings l
+      inner join profiles host on host.id = l.host_id
       left join listing_join_requests req
         on req.listing_id = l.id
        and req.guest_profile_id = $2::uuid
@@ -102,6 +111,7 @@ async function canAccessListingRoom(listingId, profileId) {
           l.host_id = $2::uuid
           or req.status = 'approved'
         )
+        and not ${buildBlockedRelationSql('host.id', '$2::uuid')}
       limit 1
     `,
     [listingId, profileId],
